@@ -289,27 +289,6 @@ function render() {
 
   new PAL.Element('button', {
     parent: root,
-    text: 'light2',
-    classes: [cur_mode == 'light' ? 'selected' : ''],
-    events: {
-      onmousedown: function(ev) {
-        ev.preventDefault();
-        push.reply = function(latest) {
-          var vx = massFunc({latest:latest, mass:3000 + 60000 * latest.y, min_force:5000, damping:0.85});
-          var vy = latest.fy * 0.00003;
-          vx = suppress(vx);
-          vx = minValSmooth(vx, 1);
-          vy = minValSmooth(vy, 1);
-          return {'m1vel': vx + vy, 'm2vel': vx - vy};
-        };
-        cur_mode = 'light';
-        render();
-      }
-    }
-  });
-
-  new PAL.Element('button', {
-    parent: root,
     text: 'mass	🎳',
     classes: [cur_mode == 'mass' ? 'selected' : ''],
     events: {
@@ -317,23 +296,6 @@ function render() {
         ev.preventDefault();
         push.reply = function(latest) {
           var v = massFunc({latest:latest, mass:200000});
-          return {'m1vel': v, 'm2vel': v};
-        };
-        cur_mode = 'mass';
-        render();
-      }
-    }
-  });
-
-  new PAL.Element('button', {
-    parent: root,
-    text: 'mass2',
-    classes: [cur_mode == 'mass' ? 'selected' : ''],
-    events: {
-      onmousedown: function(ev) {
-        ev.preventDefault();
-        push.reply = function(latest) {
-          var v = massFunc({latest:latest, mass:-200000});
           return {'m1vel': v, 'm2vel': v};
         };
         cur_mode = 'mass';
