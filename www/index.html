@@ -1,0 +1,681 @@
+<html>
+<head>
+<meta charset="utf-8" />
+<script src="pushback.js"></script>
+<script src="palilalia.js"></script>
+<title>timeline</title>
+<style>
+body {
+}
+button {
+  margin: 5px;
+  font-size: 150%;
+}
+canvas {
+  border: 1px solid #ccc;
+}
+#btn-area {
+  width: 100%;
+  text-align: center;
+}
+.ignore {
+  background-color: #f00;
+  font-size: 100%;
+}
+.enforce {
+  background-color: #0f0;
+  font-size: 100%;
+}
+.selected {
+  background-color: #f00;
+}
+</style>
+</head>
+<body>
+<script>
+
+var push = new PushBack();
+var root;
+var cur_mode;
+
+function render() {
+  root = new PAL.Root();
+  
+  new PAL.Element('button', {
+    text: push.ignore_limits ? 'ignoring limits' : 'enforcing limits',
+    classes: [push.ignore_limits ? 'ignore' : 'enforce'],
+    parent: root,
+    events: {
+      onclick: function() {
+        push.ignore_limits = !push.ignore_limits;
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('canvas', {
+    parent: root,
+    id: 'canvas',
+    attrs: {
+      width: document.body.clientWidth - 20,
+      height: 400
+    }
+  });
+
+  var btnArea = new PAL.Element('div', {
+    id: 'btn-area',
+    text: '',
+    parent: root});
+  
+  new PAL.Element('button', {
+    parent: btnArea,
+    text: 'move ↔↕',
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        
+        var startx = ev.clientX;
+        var starty = ev.clientY;
+        
+        window.onmousemove = function(ev) {
+          ev.preventDefault();
+          var dx = ev.clientX - startx;
+          var dy = ev.clientY - starty;
+          var xscale = 1.0 / 60;
+          var yscale = 0.1 / 60;
+          push.reply = function() {
+            return {'m1vel': dx * xscale - dy * yscale,
+                    'm2vel': dx * xscale + dy * yscale};
+          }
+          render();
+        }
+        window.onmouseup = stop;
+      },
+      ontouchstart: function(ev) {
+        ev.preventDefault();
+        
+        var startx = ev.clientX;
+        var starty = ev.clientY;
+        
+        window.ontouchmove = function(ev) {
+          ev.preventDefault();
+          var dx = ev.clientX - startx;
+          var dy = ev.clientY - starty;
+          var xscale = 1.0 / 60;
+          var yscale = 0.1 / 60;
+          push.reply = function() {
+            return {'m1vel': dx * xscale - dy * yscale,
+                    'm2vel': dx * xscale + dy * yscale};
+          }
+          render();
+        }
+        window.ontouchend = stop;
+      }
+    }
+  });
+  
+  new PAL.Element('button', {
+    parent: root,
+    text: 'zero',
+    events: {
+      onclick: function() {
+        push.set_zero_force();
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'cal',
+    classes: [cur_mode == 'cal' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        cur_mode = 'cal';
+
+        push.ignore_limits = true;
+        var cal_mode = 'wide';
+
+        push.reply = function(latest) {
+          var m1, m2;
+          
+          var limit = 50000;
+
+          if (cal_mode == 'wide') {
+            m1 = 1;
+            m2 = -1;
+            if ((m1 > 0 && latest.f1norm < -limit) ||
+                (m2 < 0 && latest.f2norm > limit)) {
+                  console.log('found pincer max');
+                  push.set_gap_min(1000);
+                  cal_mode = 'narrow';
+            }
+          }
+          if (cal_mode == 'narrow') {
+            m1 = -0.5;
+            m2 = 0.5;
+            if ((m1 < 0 && latest.f1norm > limit) ||
+                (m2 > 0 && latest.f2norm < -limit)) {
+                  console.log('found pincer min');
+                  push.set_gap_max(600);
+                  m1 = 0; m2 = 0;
+                  cal_mode = 'relax';
+            }
+          }
+          if (cal_mode == 'relax') {
+            m1 = 1;
+            m2 = -1;
+            if (latest.m2pos - latest.m1pos < 3000)
+              cal_mode = 'left';
+          }
+          if (cal_mode == 'center') {
+            m1 = 5;
+            m2 = 5;
+            if (latest.m1pos > -20000) {
+              stop();
+              return null;
+            }
+          }
+          if (cal_mode == 'left') {
+            m1 = -2;
+            m2 = -2;
+            if ((m1 < 0 && latest.f1norm > limit) ||
+                (m2 < 0 && latest.f2norm > limit)) {
+                  console.log('found left limit');
+                  push.set_motor_end('m1', 1000);
+                  push.set_motor_end('m2', -52500);
+                  cal_mode = 'center';
+                  m1 = 0; m2 = 0;
+            }
+          }
+          return {'m1vel': m1, 'm2vel': m2};
+        }
+        render();
+      }
+    }
+  });
+  
+  new PAL.Element('br', {parent: root, id: 'br0'});
+  
+  function minVal(x, val) {
+    if (x > val) return (x - val);
+    if (x < -val) return (x + val);
+    return 0;
+  }
+
+  function minValSmooth(x, val) {
+    var elbow = val*2;
+    var s = Math.sign(x);
+    var r = s * (Math.sqrt(x*x + elbow*elbow) - elbow);
+    return r;
+  }
+
+  function avgVal(key, N) {
+    var arr = push.get_history(key, N);
+    return arr.reduce(function(x,y) { return x+y; }, 0) / arr.length;
+  }
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'heavy 🛢️',
+    classes: [cur_mode == 'heavy' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var fx = Math.pow(avgVal('fx', 8)/75000, 3);
+          var fy = Math.pow(avgVal('fy', 8)/300000, 3);
+          return {'m1vel': fx + fy, 'm2vel': fx - fy};
+        }
+        cur_mode = 'heavy';
+        render();
+      }
+    }
+  });
+
+  var massV = 0;
+  function massFunc(attr) {
+    var latest = attr.latest;
+    var mass = attr.mass || 100000;
+    var min_force = attr.min_force || 0;
+    var damping = attr.damping || 1.0;
+    var f = latest.fx + (attr.force_bias || 0);
+    if (min_force) f = minValSmooth(f, min_force);
+    if (Math.abs(latest.m1vel + latest.m2vel) < 0.5 && Math.abs(massV) > 1)
+      massV = 0;  // stopped by limits
+    massV += f / mass;
+    massV *= damping;
+    if (massV > push.max_rps) massV = push.max_rps;
+    if (massV < -push.max_rps) massV = -push.max_rps;
+    return massV;
+  }
+
+  var dirCount = 0;
+  var lastDir = false;
+  function suppress(x) {
+    var newDir = x > 0;
+    if (newDir != lastDir) {
+      dirCount++;
+      lastDir = newDir;
+    }
+    dirCount *= 0.98;
+    var factor = Math.max(0, dirCount - 2);
+    factor = Math.max(0, 1 - factor/3);
+    //console.log(dirCount, factor);
+    return x * factor;
+  }
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'light 📎',
+    classes: [cur_mode == 'light' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var vx = massFunc({latest:latest, mass:3000, min_force:5000, damping:0.85});
+          var vy = latest.fy * 0.00003;
+          vx = suppress(vx);
+          vx = minValSmooth(vx, 1);
+          vy = minValSmooth(vy, 1);
+          return {'m1vel': vx + vy, 'm2vel': vx - vy};
+        };
+        cur_mode = 'light';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'light2',
+    classes: [cur_mode == 'light' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var vx = massFunc({latest:latest, mass:3000 + 60000 * latest.y, min_force:5000, damping:0.85});
+          var vy = latest.fy * 0.00003;
+          vx = suppress(vx);
+          vx = minValSmooth(vx, 1);
+          vy = minValSmooth(vy, 1);
+          return {'m1vel': vx + vy, 'm2vel': vx - vy};
+        };
+        cur_mode = 'light';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'mass	🎳',
+    classes: [cur_mode == 'mass' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var v = massFunc({latest:latest, mass:200000});
+          return {'m1vel': v, 'm2vel': v};
+        };
+        cur_mode = 'mass';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'mass2',
+    classes: [cur_mode == 'mass' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var v = massFunc({latest:latest, mass:-200000});
+          return {'m1vel': v, 'm2vel': v};
+        };
+        cur_mode = 'mass';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'spring ⦚',
+    classes: [cur_mode == 'spring' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var vx = latest.fx * 0.00015 - 80 * (latest.x - 0.5);
+          var vy = latest.fy * 0.00006 + 10 * (1.0 - latest.y);
+          vy = minValSmooth(vy, 3);
+          vx = minValSmooth(vx, 1);
+
+          if (latest.y < 0.3 && vy < 0) vy = 0;
+          if (latest.y > 0.9 && vy > 0) vy = 0;
+
+          vx = suppress(vx);
+          var m1 = vx + vy;
+          var m2 = vx - vy;
+          return {'m1vel': m1, 'm2vel': m2};
+        };
+        cur_mode = 'spring';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'limits ⇤⇥',
+    classes: [cur_mode == 'limits' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var v = massFunc({latest:latest, mass:3000, min_force:5000, damping:0.9});
+          if ((latest.x < 0.4 && v < 0) || (latest.x > 0.6 && v > 0)) return null;
+          return {'m1vel': v, 'm2vel': v};
+        };
+        cur_mode = 'limits';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: "tick '''''",
+    classes: [cur_mode == 'tick' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+
+        var tickDist = 0.046;
+        var tickForce = 12500;
+        var tickAttraction = 20000;
+
+        var tickMode = true;
+        var leftTickPos = 0;
+        var rightTickPos = 0;
+
+        push.reply = function(latest) {
+          var dir = Math.sign(latest.m1vel + latest.m2vel);
+
+          if (tickMode && Math.abs(latest.fx) > tickForce) {
+            tickMode = false;
+            if (latest.f1norm + latest.f2norm > 0) {
+              leftTickPos = latest.x;
+              rightTickPos = latest.x + tickDist;
+            } else {
+              leftTickPos = latest.x - tickDist;
+              rightTickPos = latest.x;
+            }
+            //console.log('leaving tick');
+          } else if (!tickMode && (latest.x <= leftTickPos || latest.x >= rightTickPos)) {
+            tickMode = true;
+            //console.log('entering tick');
+          }
+          var vx = 0;
+          var vy = 0;
+          if (!tickMode) {
+            var zonePos = latest.x - leftTickPos;
+            var bias = (zonePos - tickDist/2) / tickDist * 2 * tickAttraction;
+            vx = massFunc({latest:latest, mass:5000, min_force:15000, damping:0.9, force_bias:bias});
+          }
+
+          // spring pincer
+          var fy = avgVal('fy', 28);
+          var vy = fy * 0.00004 + 10 * (1.0 - latest.y);
+          if (latest.y < 0.3 && vy < 0) vy = 0;
+          if (latest.y > 0.9 && vy > 0) vy = 0;
+
+          return {'m1vel': vx + vy, 'm2vel': vx - vy};
+        };
+        cur_mode = 'tick';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'notch ⍽⍽',
+    classes: [cur_mode == 'notch' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        var boxWidth = 0.07;
+        var gapWidth = 0.007;
+        var x = push.get_history('x',1)[0];
+        var leftBound = x - gapWidth / 2;
+        var rightBound = x + gapWidth / 2;
+        var state = 'notch';
+        
+        push.reply = function(latest) {
+          var vx = massFunc({latest:latest, mass:8000, min_force:15000, damping:0.8});
+          var vy = minValSmooth(latest.fy * 0.00005 + 2, 0.5);
+          if (latest.y < 0.2 && vy < 0) vy = 0;
+          if (latest.y > 0.6 && vy > 0) vy = 0;
+
+          if (latest.y > 0.3) {
+            if ((state == 'notch' || state == 'left edge')
+                && latest.x < leftBound && vx < 0) {
+                  state = 'left edge';
+                  vx = 0;
+            }
+            if (state == 'left edge' && latest.x > leftBound)
+              state = 'notch';
+            if ((state == 'notch' || state == 'right edge')
+                && latest.x > rightBound && vx > 0) {
+                  state = 'right edge';
+                  vx = 0;
+            }
+            if (state == 'right edge' && latest.x < rightBound)
+              state = 'notch';
+            if ((state == 'free' || state == 'bottom edge')
+                && (latest.x < leftBound || latest.x > rightBound) && vy > 0) {
+                  state = 'bottom edge';
+                  vy = 0;
+            }
+            if ((state == 'free' || state == 'bottom edge')
+                && (latest.x > leftBound && latest.x < rightBound))
+              state = 'notch';
+          } else {
+            state = 'free';
+          }
+          if (state == 'bottom edge' || state == 'free') {
+            if (latest.x > rightBound) leftBound = rightBound + boxWidth;
+            else if (latest.x < leftBound) rightBound = leftBound - boxWidth;
+            if (latest.x > leftBound) rightBound = leftBound + gapWidth;
+            else if (latest.x < rightBound) leftBound = rightBound - gapWidth;
+          }
+          /*
+          if (state == 'left edge')
+            vy += latest.fx * 0.00002;
+          if (state == 'right edge')
+            vy -= latest.fx * 0.00002;
+          */
+          //console.log(state, x, leftBound, rightBound);
+          return {'m1vel': vx + vy, 'm2vel': vx - vy};
+        };
+        cur_mode = 'notch';
+        render();
+      }
+    }
+  });
+
+  new PAL.Element('button', {
+    parent: root,
+    text: 'wave ∿',
+    classes: [cur_mode == 'wave' ? 'selected' : ''],
+    events: {
+      onmousedown: function(ev) {
+        ev.preventDefault();
+        push.reply = function(latest) {
+          var fx = avgVal('fx', 8);
+          var fy = avgVal('fy', 8);
+          fx = minValSmooth(fx, 7500);
+          fy = minValSmooth(fy, 7500);
+          var vx = fx * 0.0002;
+          vx += Math.cos(latest.x * 25) * fy * 0.00005;
+
+          var target_y = (Math.sin(latest.x * 25) + 1)/2;
+          var vy = (target_y - latest.y)*20;
+
+          vx = suppress(vx);
+
+          // limit vx so that there's room for vy below the speed limit
+          if (vx > 10) vx = 10;
+          if (vx < -10) vx = -10;
+          var m1 = vx + vy;
+          var m2 = vx - vy;
+          return {'m1vel': m1, 'm2vel': m2};
+        };
+        cur_mode = 'wave';
+        render();
+      }
+    }
+  });
+
+  root.show();
+}
+  
+function render_canvas() { 
+  var $can = root.getElementById('canvas').$el;
+  var ctx = $can.getContext('2d');
+  var w = $can.width;
+  var h = $can.height;
+  
+  ctx.clearRect(0, 0, w, h);
+  
+  var posRange = 100000;
+  var forceRange = 1000000;
+
+  var width = push.m1_end + push.m2_end - push.gap_min;
+
+  var m1arr = push.get_history('m1pos', h);
+  var m2arr = push.get_history('m2pos', h);
+
+  var leftLimit = w/2 - width/2*w/posRange;
+  var rightLimit = w/2 + width/2*w/posRange;
+
+  // limits
+  ctx.fillStyle = 'rgba(0,0,0,0.1)';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(leftLimit, 0);
+  ctx.lineTo(leftLimit, h);
+  ctx.lineTo(0, h);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(rightLimit, 0);
+  ctx.lineTo(w, 0);
+  ctx.lineTo(w, h);
+  ctx.lineTo(rightLimit, h);
+  ctx.fill();
+
+  // pincer zone
+  ctx.fillStyle = 'rgba(0,0,0,0.1)';
+  ctx.beginPath();
+  ctx.moveTo(w/2, 0);
+  for (var i=0; i<m1arr.length; i++) {
+    var x = (m1arr[i] + m2arr[i] - (push.gap_max - push.gap_min)) / 2 * w / posRange + w/2;
+    ctx.lineTo(x, i);
+  }
+  for (var i=m2arr.length; i>=0; i--) {
+    var x = (m1arr[i] + m2arr[i] + (push.gap_max - push.gap_min)) / 2 * w / posRange + w/2;
+    ctx.lineTo(x, i);
+  }
+  ctx.fill();
+
+  // motor 1
+  ctx.strokeStyle = 'magenta';
+  ctx.beginPath();
+  m1arr.forEach(function(val, idx) {
+    var x = val * w / posRange + w/2;
+    if(idx == 0)
+      ctx.moveTo(x, idx);
+    else
+      ctx.lineTo(x, idx);
+  });
+  ctx.stroke();
+  
+  // motor 2
+  ctx.strokeStyle = 'green';
+  ctx.beginPath();
+  m2arr.forEach(function(val, idx) {
+    var x = val * w / posRange + w/2;
+    if(idx == 0)
+      ctx.moveTo(x, idx);
+    else
+      ctx.lineTo(x, idx);
+  });
+  ctx.stroke();
+
+  // force 1
+  ctx.strokeStyle ='rgba(255,0,0,0.6)' ;
+  ctx.fillStyle = 'rgba(255,0,0,0.3)';
+  var xoff = leftLimit;//w * 0.4;
+  var arr = push.get_history('f1norm', h);
+  ctx.beginPath();
+  ctx.moveTo(xoff, arr.length-1);
+  ctx.lineTo(xoff, 0);
+  ctx.stroke();
+  arr.forEach(function(val, idx) {
+        var x = val * w / forceRange + xoff;
+        ctx.lineTo(x, idx);
+      });
+  ctx.fill();
+
+  // force 2
+  ctx.strokeStyle = 'rgba(0,0,255,0.6)';
+  ctx.fillStyle = 'rgba(0,0,255,0.3)';
+  var xoff = rightLimit;//w * 0.6;
+  var arr = push.get_history('f2norm', h);
+  ctx.beginPath();
+  ctx.moveTo(xoff, arr.length-1);
+  ctx.lineTo(xoff, 0);
+  ctx.stroke();
+  arr.forEach(function(val, idx) {
+        var x = val * w / forceRange + xoff;
+        ctx.lineTo(x, idx);
+      });
+  ctx.fill();
+  
+  window.requestAnimationFrame(render_canvas);
+}
+
+function stop(ev) {
+  if (ev) ev.preventDefault();
+  push.ignore_limits = false;
+  window.onmousemove = null;
+  window.onmouseup = null;
+  window.ontouchmove = null;
+  window.ontouchend = null;
+  push.reply = null;  // stop
+  cur_mode = '';
+  render();
+}
+
+push.onload = function() {
+  render();
+  render_canvas();
+
+  window.addEventListener('keydown', function(e) {
+    if (e.keyCode == 27 || e.key == ' ') {
+      // escape key
+      stop();
+      console.log('stop');
+      return;
+    }
+  });
+}
+
+</script>
+</body>
+</html>
